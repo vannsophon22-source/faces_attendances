@@ -71,7 +71,7 @@ while True:
         
         if name not in recorded_attendance:
             # Check if time is between 2:00 PM (14) and 2:15 PM
-            if now.hour == 14 and 0 <= now.minute <= 15:
+            # if now.hour == 14 and 0 <= now.minute <= 15:
                 # Log to CSV
                 file_path = f"Attendance/Attendance_{date}.csv"
                 file_exists = os.path.isfile(file_path)
@@ -88,10 +88,10 @@ while True:
                 print(f"Logged: {name} at {timestamp}")
                 speak(f"Attendance taken for {name}")
             
-            else:
-                # Handle Late Students (Optional: log them as LATE if you wish)
-                color = (0, 165, 255) # Orange box for late
-                status_text = "LATE - NOT RECORDED"
+            # else:
+            #     # Handle Late Students (Optional: log them as LATE if you wish)
+            #     color = (0, 165, 255) # Orange box for late
+            #     status_text = "LATE - NOT RECORDED"
 
         # If already recorded, change UI to GREEN
         if name in recorded_attendance:
