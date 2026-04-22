@@ -5,16 +5,12 @@ import os
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
-# -------------------------------------------------------
-# CONFIGURATION
-# -------------------------------------------------------
+# configuration
 SAMPLES_PER_IMAGE = 10   # How many augmented samples to generate per uploaded photo
-IMG_SIZE = (50, 50)      # Must match what Add_faces.py and test.py use
+IMG_SIZE = (100, 100)      # Must match what Add_faces.py and test.py use
 DATA_DIR = "data"
 
-# -------------------------------------------------------
-# HELPERS
-# -------------------------------------------------------
+# HELPER FUNCTIONS
 
 def ensure_data_dir():
     if not os.path.exists(DATA_DIR):
@@ -29,47 +25,48 @@ def load_haar():
         )
     return cv2.CascadeClassifier(xml_path)
 
+# teaching the system to recognize new faces from uploaded photos
 def augment_face(face_img):
     """Generate multiple augmented versions of a single face crop."""
     samples = []
     h, w = face_img.shape[:2]
 
-    # Original
+    # 1. Original, resized 100x100
     samples.append(cv2.resize(face_img, IMG_SIZE))
 
-    # Horizontal flip
+    # 2. Horizontal flip
     samples.append(cv2.resize(cv2.flip(face_img, 1), IMG_SIZE))
 
-    # Brightness variations
+    # 3-4. Brightness variations
     for gamma in [0.7, 1.3]:
         table = np.array([((i / 255.0) ** (1.0 / gamma)) * 255
                           for i in range(256)], dtype=np.uint8)
         adjusted = cv2.LUT(face_img, table)
         samples.append(cv2.resize(adjusted, IMG_SIZE))
 
-    # Small rotations
+    # 5-6. Small rotations
     center = (w // 2, h // 2)
     for angle in [-10, 10]:
         M = cv2.getRotationMatrix2D(center, angle, 1.0)
         rotated = cv2.warpAffine(face_img, M, (w, h))
         samples.append(cv2.resize(rotated, IMG_SIZE))
 
-    # Slight zoom-in crop
+    # 7. Slight zoom-in crop
     margin = int(min(h, w) * 0.1)
     if margin > 0:
         cropped = face_img[margin:h-margin, margin:w-margin]
         samples.append(cv2.resize(cropped, IMG_SIZE))
 
-    # Gaussian blur (simulates slight out-of-focus)
+    # 8. Gaussian blur (simulates slight out-of-focus)
     blurred = cv2.GaussianBlur(face_img, (3, 3), 0)
     samples.append(cv2.resize(blurred, IMG_SIZE))
 
-    # Grayscale-converted back to BGR (lighting robustness)
+    # 9. Grayscale-converted back to BGR (lighting robustness)
     gray = cv2.cvtColor(face_img, cv2.COLOR_BGR2GRAY)
     gray_bgr = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
     samples.append(cv2.resize(gray_bgr, IMG_SIZE))
 
-    # Small translation
+    # 10. Small translation
     M2 = np.float32([[1, 0, 3], [0, 1, 3]])
     translated = cv2.warpAffine(face_img, M2, (w, h))
     samples.append(cv2.resize(translated, IMG_SIZE))
@@ -83,9 +80,12 @@ def extract_faces_from_image(image_path, facedetect):
         return [], f"Could not read image: {os.path.basename(image_path)}"
 
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    #scalefactor controls how much the image size is reduced at each image scale. 1.1 means reduce by 10% each time
+    #minNeighbors scan the img multiple times and only return a face if it detects it at least this many times. Higher = more strict, better for far faces
     faces = facedetect.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5)
 
     crops = []
+    # crop out the detected faces and store them in a list
     for (x, y, w, h) in faces:
         crop = img[y:y+h, x:x+w]
         crops.append(crop)
@@ -99,8 +99,8 @@ def save_face_data(name, all_samples):
     """Append new face samples and labels to the pkl files."""
     ensure_data_dir()
 
-    faces_array = np.array(all_samples)                        # (N, 50, 50, 3)
-    faces_flat  = faces_array.reshape(len(all_samples), -1)    # (N, 7500)
+    faces_array = np.array(all_samples)                        # (N, 100, 100, 3)
+    faces_flat  = faces_array.reshape(len(all_samples), -1)    # (N, 30000)
 
     names_list = [name] * len(all_samples)
 
@@ -130,9 +130,7 @@ def save_face_data(name, all_samples):
 
     return len(all_samples)
 
-# -------------------------------------------------------
-# GUI
-# -------------------------------------------------------
+# GUI Application
 
 class UploadFacesApp:
     def __init__(self, root):
@@ -178,7 +176,8 @@ class UploadFacesApp:
                   activebackground="#74c7ec", relief="flat",
                   padx=14, pady=8, cursor="hand2").grid(row=0, column=0, padx=8)
 
-        tk.Button(btn_frame, text="✅  Register",
+        # register
+        tk.Button(btn_frame, text="Register",
                   command=self.register,
                   font=("Helvetica", 11, "bold"), bg="#a6e3a1", fg="#1e1e2e",
                   activebackground="#94e2d5", relief="flat",
@@ -250,9 +249,11 @@ class UploadFacesApp:
         all_samples = []
         errors = []
 
+        # total number of photo to process (e.g. 5 photos = maximum 5)
         self.progress["maximum"] = len(self.selected_files)
         self.progress["value"] = 0
 
+        # process each selected photo, extract faces, augment them, and collect samples
         for i, path in enumerate(self.selected_files):
             crops, err = extract_faces_from_image(path, facedetect)
             if err:
@@ -274,9 +275,9 @@ class UploadFacesApp:
 
         total_saved = save_face_data(name, all_samples)
 
-        status = f"✅ Success! Registered '{name}' with {total_saved} face samples from {len(self.selected_files) - len(errors)} photo(s)."
+        status = f"Success! Registered '{name}' with {total_saved} face samples from {len(self.selected_files) - len(errors)} photo(s)."
         if errors:
-            status += f"\n⚠️ {len(errors)} photo(s) had no detectable face and were skipped."
+            status += f"\n {len(errors)} photo(s) had no detectable face and were skipped."
 
         self.status_label.config(text=status)
         messagebox.showinfo("Registration Complete",
@@ -291,9 +292,7 @@ class UploadFacesApp:
         self.progress["value"] = 0
 
 
-# -------------------------------------------------------
-# ENTRY POINT
-# -------------------------------------------------------
+# entry point
 if __name__ == "__main__":
     ensure_data_dir()
     root = tk.Tk()
