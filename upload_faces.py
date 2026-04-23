@@ -4,10 +4,9 @@ import numpy as np
 import os
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
+import face_recognition
+from PIL import Image
 
-# configuration
-SAMPLES_PER_IMAGE = 10   # How many augmented samples to generate per uploaded photo
-IMG_SIZE = (100, 100)      # Must match what Add_faces.py and test.py use
 DATA_DIR = "data"
 
 # HELPER FUNCTIONS
@@ -16,95 +15,35 @@ def ensure_data_dir():
     if not os.path.exists(DATA_DIR):
         os.makedirs(DATA_DIR)
 
-def load_haar():
-    xml_path = os.path.join(DATA_DIR, "haarcascade_frontalface_default.xml")
-    if not os.path.exists(xml_path):
-        raise FileNotFoundError(
-            f"Cannot find {xml_path}.\n"
-            "Make sure haarcascade_frontalface_default.xml is inside your 'data/' folder."
-        )
-    return cv2.CascadeClassifier(xml_path)
+MAX_WIDTH = 800  # resize large photos before processing to speed up HOG detection
 
-# teaching the system to recognize new faces from uploaded photos
-def augment_face(face_img):
-    """Generate multiple augmented versions of a single face crop."""
-    samples = []
-    h, w = face_img.shape[:2]
+def extract_encodings_from_image(image_path):
+    """Load an image, detect faces with face_recognition, return list of 128-dim encodings."""
+    try:
+        pil_img = Image.open(image_path).convert('RGB')
+        # Downscale large images — HOG is much faster on smaller images
+        w, h = pil_img.size
+        if w > MAX_WIDTH:
+            pil_img = pil_img.resize((MAX_WIDTH, int(h * MAX_WIDTH / w)), Image.LANCZOS)
+        rgb_img = np.array(pil_img)
+    except Exception as e:
+        return [], f"Could not read image: {os.path.basename(image_path)} ({e})"
 
-    # 1. Original, resized 100x100
-    samples.append(cv2.resize(face_img, IMG_SIZE))
+    locations = face_recognition.face_locations(rgb_img, model="hog")
+    encodings = face_recognition.face_encodings(rgb_img, locations)
 
-    # 2. Horizontal flip
-    samples.append(cv2.resize(cv2.flip(face_img, 1), IMG_SIZE))
-
-    # 3-4. Brightness variations
-    for gamma in [0.7, 1.3]:
-        table = np.array([((i / 255.0) ** (1.0 / gamma)) * 255
-                          for i in range(256)], dtype=np.uint8)
-        adjusted = cv2.LUT(face_img, table)
-        samples.append(cv2.resize(adjusted, IMG_SIZE))
-
-    # 5-6. Small rotations
-    center = (w // 2, h // 2)
-    for angle in [-10, 10]:
-        M = cv2.getRotationMatrix2D(center, angle, 1.0)
-        rotated = cv2.warpAffine(face_img, M, (w, h))
-        samples.append(cv2.resize(rotated, IMG_SIZE))
-
-    # 7. Slight zoom-in crop
-    margin = int(min(h, w) * 0.1)
-    if margin > 0:
-        cropped = face_img[margin:h-margin, margin:w-margin]
-        samples.append(cv2.resize(cropped, IMG_SIZE))
-
-    # 8. Gaussian blur (simulates slight out-of-focus)
-    blurred = cv2.GaussianBlur(face_img, (3, 3), 0)
-    samples.append(cv2.resize(blurred, IMG_SIZE))
-
-    # 9. Grayscale-converted back to BGR (lighting robustness)
-    gray = cv2.cvtColor(face_img, cv2.COLOR_BGR2GRAY)
-    gray_bgr = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
-    samples.append(cv2.resize(gray_bgr, IMG_SIZE))
-
-    # 10. Small translation
-    M2 = np.float32([[1, 0, 3], [0, 1, 3]])
-    translated = cv2.warpAffine(face_img, M2, (w, h))
-    samples.append(cv2.resize(translated, IMG_SIZE))
-
-    return samples[:SAMPLES_PER_IMAGE]
-
-def extract_faces_from_image(image_path, facedetect):
-    """Load an image, detect faces, return list of face crops."""
-    img = cv2.imread(image_path)
-    if img is None:
-        return [], f"Could not read image: {os.path.basename(image_path)}"
-
-    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    #scalefactor controls how much the image size is reduced at each image scale. 1.1 means reduce by 10% each time
-    #minNeighbors scan the img multiple times and only return a face if it detects it at least this many times. Higher = more strict, better for far faces
-    faces = facedetect.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5)
-
-    crops = []
-    # crop out the detected faces and store them in a list
-    for (x, y, w, h) in faces:
-        crop = img[y:y+h, x:x+w]
-        crops.append(crop)
-
-    if len(crops) == 0:
+    if not encodings:
         return [], f"No face detected in: {os.path.basename(image_path)}"
 
-    return crops, None
+    return encodings, None
 
-def save_face_data(name, all_samples):
-    """Append new face samples and labels to the pkl files."""
+def save_face_data(name, encodings):
+    """Append new face encodings and labels to the pkl files."""
     ensure_data_dir()
 
-    faces_array = np.array(all_samples)                        # (N, 100, 100, 3)
-    faces_flat  = faces_array.reshape(len(all_samples), -1)    # (N, 30000)
+    faces_array = np.array(encodings)  # (N, 128)
+    names_list = [name] * len(encodings)
 
-    names_list = [name] * len(all_samples)
-
-    # --- names.pkl ---
     names_path = os.path.join(DATA_DIR, "names.pkl")
     if os.path.exists(names_path):
         with open(names_path, "rb") as f:
@@ -116,19 +55,20 @@ def save_face_data(name, all_samples):
     with open(names_path, "wb") as f:
         pickle.dump(existing_names, f)
 
-    # --- faces_data.pkl ---
     faces_path = os.path.join(DATA_DIR, "faces_data.pkl")
     if os.path.exists(faces_path):
         with open(faces_path, "rb") as f:
             existing_faces = pickle.load(f)
-        existing_faces = np.append(existing_faces, faces_flat, axis=0)
+        if existing_faces.shape[1] != 128:
+            raise ValueError("Existing data uses the old raw-pixel format. Delete data/faces_data.pkl and data/names.pkl, then re-register.")
+        existing_faces = np.append(existing_faces, faces_array, axis=0)
     else:
-        existing_faces = faces_flat
+        existing_faces = faces_array
 
     with open(faces_path, "wb") as f:
         pickle.dump(existing_faces, f)
 
-    return len(all_samples)
+    return len(encodings)
 
 # GUI Application
 
@@ -240,49 +180,43 @@ class UploadFacesApp:
             messagebox.showwarning("No Photos", "Please select at least one photo.")
             return
 
-        try:
-            facedetect = load_haar()
-        except FileNotFoundError as e:
-            messagebox.showerror("Missing File", str(e))
-            return
-
-        all_samples = []
+        all_encodings = []
         errors = []
 
-        # total number of photo to process (e.g. 5 photos = maximum 5)
         self.progress["maximum"] = len(self.selected_files)
         self.progress["value"] = 0
 
-        # process each selected photo, extract faces, augment them, and collect samples
         for i, path in enumerate(self.selected_files):
-            crops, err = extract_faces_from_image(path, facedetect)
+            encodings, err = extract_encodings_from_image(path)
             if err:
                 errors.append(err)
             else:
-                for crop in crops:
-                    samples = augment_face(crop)
-                    all_samples.extend(samples)
+                all_encodings.extend(encodings)
 
             self.progress["value"] = i + 1
             self.root.update_idletasks()
 
-        if not all_samples:
+        if not all_encodings:
             msg = "No faces could be detected in any of the selected photos.\n\nTips:\n- Use clear, well-lit photos\n- Make sure your face is visible and not too small"
             if errors:
                 msg += "\n\nDetails:\n" + "\n".join(errors)
             messagebox.showerror("No Faces Found", msg)
             return
 
-        total_saved = save_face_data(name, all_samples)
+        try:
+            total_saved = save_face_data(name, all_encodings)
+        except ValueError as e:
+            messagebox.showerror("Data Format Error", str(e))
+            return
 
-        status = f"Success! Registered '{name}' with {total_saved} face samples from {len(self.selected_files) - len(errors)} photo(s)."
+        status = f"Success! Registered '{name}' with {total_saved} face encoding(s) from {len(self.selected_files) - len(errors)} photo(s)."
         if errors:
             status += f"\n {len(errors)} photo(s) had no detectable face and were skipped."
 
         self.status_label.config(text=status)
         messagebox.showinfo("Registration Complete",
                             f"'{name}' has been registered!\n\n"
-                            f"Samples saved: {total_saved}\n"
+                            f"Face encodings saved: {total_saved}\n"
                             f"You can now run test.py to take attendance.")
 
         # Reset
